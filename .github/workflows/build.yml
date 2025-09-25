@@ -2,9 +2,7 @@ name: build gwlbtun
 
 on:
   push:
-    branches:
-     - main
-     - station70-daniel-patch-1
+    branches: [ main ,station70-daniel-patch-1 ]
 
 permissions:
   contents: write
@@ -12,52 +10,82 @@ permissions:
 jobs:
   build-gwlbtun:
     runs-on: ubuntu-latest
-    # Build inside AL2023 so glibc matches the AMI
     container:
       image: public.ecr.aws/amazonlinux/amazonlinux:2023
     steps:
-      - name: Install tar
+      # Checkout needs tar/gzip inside the container
+      - name: Install base tools for checkout
         run: |
           dnf -y update
           dnf -y install tar gzip
-          
+
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies (AL2023)
+      - name: Install build deps
         run: |
-          dnf -y update
           dnf -y groupinstall "Development Tools"
-          dnf -y install cmake gcc-c++ git openssl-devel boost-devel
+          dnf -y install cmake gcc-c++ git bzip2 wget openssl-devel
 
-      - name: Configure & build
+      # Optional: cache your locally-built Boost to speed up future runs
+      - name: Restore Boost cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/boost-1.83/install
+          key: boost-1.83-al2023-${{ hashFiles('**/CMakeLists.txt') }}
+          restore-keys: |
+            boost-1.83-al2023-
+
+      - name: Build Boost 1.83 if cache miss
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release .
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          if [ ! -d boost-1.83/install ]; then
+            echo "Building Boost 1.83..."
+            wget -O boost_1_83_0.tar.bz2 https://sourceforge.net/projects/boost/files/boost/1.83.0/boost_1_83_0.tar.bz2/download
+            tar xjf boost_1_83_0.tar.bz2
+            mv boost_1_83_0 boost-1.83
+            cd boost-1.83
+            ./bootstrap.sh
+            # Build & install a local copy under boost-1.83/install
+            ./b2 -j"$(nproc)" link=shared runtime-link=shared --prefix="$(pwd)/install" install
+          else
+            echo "Using cached Boost at ${GITHUB_WORKSPACE}/boost-1.83/install"
+          fi
+
+      - name: Configure & build gwlbtun (point CMake at Boost 1.83)
+        run: |
+          set -euo pipefail
+          cd "${GITHUB_WORKSPACE}"
+          rm -f CMakeCache.txt  # avoid stale BOOST_ROOT from previous attempts
+          cmake -DCMAKE_BUILD_TYPE=Release \
+                -DBOOST_ROOT="${GITHUB_WORKSPACE}/boost-1.83/install" \
+                -DBOOST_INCLUDEDIR="${GITHUB_WORKSPACE}/boost-1.83/install/include" \
+                -DBOOST_LIBRARYDIR="${GITHUB_WORKSPACE}/boost-1.83/install/lib" \
+                .
           make -j"$(nproc)"
           strip gwlbtun || true
-          file gwlbtun
+          echo "ldd:"
           ldd gwlbtun
 
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: gwlbtun-al2023
           path: gwlbtun
 
-      - name: Set tag
+      - name: Tag
         id: tag
         run: echo "TAG=ci-$(date +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
-      - name: Create GitHub Release
+      - name: Create Release
         id: create_release
         uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.tag.outputs.TAG }}
           release_name: GWLB Tunnel Handler build ${{ steps.tag.outputs.TAG }}
           body: Automated build from main @ ${{ steps.tag.outputs.TAG }}
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload binary to Release
         uses: actions/upload-release-asset@v1
