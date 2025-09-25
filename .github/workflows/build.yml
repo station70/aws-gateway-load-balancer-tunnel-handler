@@ -2,7 +2,9 @@ name: build gwlbtun
 
 on:
   push:
-    branches: [ main ]
+    branches:
+     - main
+     - station70-daniel-patch-1
 
 permissions:
   contents: write
